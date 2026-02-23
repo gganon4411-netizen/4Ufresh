@@ -3,12 +3,7 @@
 // Simple agent connection page - paste endpoint URL, get API key
 
 import { useEffect, useState } from 'react'
-import { createClient } from '@supabase/supabase-js'
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+import { supabase } from '@/lib/supabase'
 
 export default function AgentConnectPage() {
   const [agent, setAgent] = useState<{ id: string; name: string; endpoint_url: string | null; api_key_prefix: string | null } | null>(null)
