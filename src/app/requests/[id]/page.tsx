@@ -378,79 +378,138 @@ export default function RequestDetailPage() {
         </div>
       )}
 
-      {/* ── Review tab (shown when build is delivered) ───────────────────── */}
-      {build && build.status === "delivered" && isOwner && (
+      {/* ── Review tab (delivered OR waiting on revision) ────────────────── */}
+      {build && ["delivered", "revision_requested"].includes(build.status) && isOwner && (
         <section className="mb-8 rounded-xl border border-blue-800 bg-blue-950/20 p-6">
-          <h2 className="mb-4 text-lg font-semibold text-blue-200">📦 Review Delivery</h2>
 
-          {build.delivery_url && (
-            <div className="mb-4 rounded-lg bg-zinc-800 p-3 text-sm">
-              <span className="text-zinc-400">Delivered at: </span>
-              <a
-                href={build.delivery_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="break-all text-blue-400 underline hover:text-blue-300"
-              >
-                {build.delivery_url}
-              </a>
-            </div>
-          )}
-
-          {build.revision_notes && (
-            <div className="mb-4 rounded-lg border border-zinc-700 bg-zinc-900/50 p-3 text-sm">
-              <p className="mb-1 text-xs text-zinc-500">Your last revision request:</p>
-              <p className="text-zinc-300">{build.revision_notes}</p>
-            </div>
-          )}
-
-          <label className="mb-2 block text-sm text-zinc-400">
-            Feedback / change requests for the agent:
-          </label>
-          <textarea
-            value={reviewNotes}
-            onChange={(e) => setReviewNotes(e.target.value)}
-            rows={4}
-            placeholder="Describe what you want changed, or leave blank to accept..."
-            className="mb-4 w-full rounded-lg border border-zinc-600 bg-zinc-900 px-4 py-3 text-sm text-white placeholder-zinc-500 focus:border-blue-500 focus:outline-none"
-          />
-
-          {error && <p className="mb-3 rounded bg-red-900/30 px-3 py-2 text-sm text-red-400">{error}</p>}
-
-          <div className="flex flex-wrap gap-3">
-            {/* Accept = happy, release payment */}
-            <button
-              type="button"
-              onClick={handleAccept}
-              disabled={reviewAction !== "idle"}
-              className="rounded-lg bg-green-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-green-500 disabled:opacity-50"
-            >
-              {reviewAction === "accepting" ? "Releasing payment…" : "✅ Accept & Release Payment"}
-            </button>
-
-            {/* Request changes */}
-            <button
-              type="button"
-              onClick={handleRequestRevision}
-              disabled={reviewAction !== "idle" || !reviewNotes.trim()}
-              className="rounded-lg bg-amber-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
-            >
-              {reviewAction === "revising" ? "Sending…" : "✏️ Request Changes"}
-            </button>
-
-            {/* Dispute = something is seriously wrong */}
-            <button
-              type="button"
-              onClick={handleDispute}
-              disabled={reviewAction !== "idle" || !reviewNotes.trim()}
-              className="rounded-lg border border-red-700 px-4 py-2.5 text-sm font-medium text-red-400 hover:bg-red-900/30 disabled:opacity-50"
-            >
-              {reviewAction === "disputing" ? "Opening…" : "⚠️ Open Dispute"}
-            </button>
+          {/* Escrow protection notice — always visible */}
+          <div className="mb-5 flex items-start gap-3 rounded-lg border border-green-800 bg-green-900/20 px-4 py-3 text-sm text-green-300">
+            <span className="mt-0.5 shrink-0 text-base">🔒</span>
+            <span>
+              Your payment is held safely in escrow.{" "}
+              <strong>The agent only gets paid once you accept their delivery.</strong>{" "}
+              You can request as many changes as needed until you&apos;re happy.
+            </span>
           </div>
-          <p className="mt-3 text-xs text-zinc-500">
-            Request Changes sends your notes to the agent. Open Dispute freezes the escrow for manual review.
-          </p>
+
+          {build.status === "delivered" ? (
+            <>
+              <h2 className="mb-4 text-lg font-semibold text-blue-200">📦 Review Delivery</h2>
+
+              {build.delivery_url && (
+                <div className="mb-4 rounded-lg bg-zinc-800 p-3 text-sm">
+                  <span className="text-zinc-400">Delivered at: </span>
+                  <a
+                    href={build.delivery_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="break-all text-blue-400 underline hover:text-blue-300"
+                  >
+                    {build.delivery_url}
+                  </a>
+                </div>
+              )}
+
+              {build.revision_notes && (
+                <div className="mb-4 rounded-lg border border-zinc-700 bg-zinc-900/50 p-3 text-sm">
+                  <p className="mb-1 text-xs text-zinc-500">Your last revision request:</p>
+                  <p className="text-zinc-300">{build.revision_notes}</p>
+                </div>
+              )}
+
+              <label className="mb-2 block text-sm text-zinc-400">
+                Feedback / change requests for the agent:
+              </label>
+              <textarea
+                value={reviewNotes}
+                onChange={(e) => setReviewNotes(e.target.value)}
+                rows={4}
+                placeholder="Describe what you want changed — or leave blank and click Accept if you're happy..."
+                className="mb-4 w-full rounded-lg border border-zinc-600 bg-zinc-900 px-4 py-3 text-sm text-white placeholder-zinc-500 focus:border-blue-500 focus:outline-none"
+              />
+
+              {error && <p className="mb-3 rounded bg-red-900/30 px-3 py-2 text-sm text-red-400">{error}</p>}
+
+              <div className="flex flex-wrap gap-3">
+                {/* Accept = happy, release payment */}
+                <button
+                  type="button"
+                  onClick={handleAccept}
+                  disabled={reviewAction !== "idle"}
+                  className="rounded-lg bg-green-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-green-500 disabled:opacity-50"
+                >
+                  {reviewAction === "accepting" ? "Releasing payment…" : "✅ Accept & Release Payment"}
+                </button>
+
+                {/* Request changes — needs notes */}
+                <button
+                  type="button"
+                  onClick={handleRequestRevision}
+                  disabled={reviewAction !== "idle" || !reviewNotes.trim()}
+                  className="rounded-lg bg-amber-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50"
+                >
+                  {reviewAction === "revising" ? "Sending…" : "✏️ Request Changes"}
+                </button>
+
+                {/* Dispute = something is seriously wrong */}
+                <button
+                  type="button"
+                  onClick={handleDispute}
+                  disabled={reviewAction !== "idle" || !reviewNotes.trim()}
+                  className="rounded-lg border border-red-700 px-4 py-2.5 text-sm font-medium text-red-400 hover:bg-red-900/30 disabled:opacity-50"
+                >
+                  {reviewAction === "disputing" ? "Opening…" : "⚠️ Open Dispute"}
+                </button>
+              </div>
+              <p className="mt-3 text-xs text-zinc-500">
+                Request Changes sends your notes to the agent — they must fix and re-deliver before you review again.
+                Open Dispute freezes escrow for manual platform review.
+              </p>
+            </>
+          ) : (
+            /* revision_requested — agent is fixing */
+            <>
+              <h2 className="mb-3 text-lg font-semibold text-amber-200">✏️ Waiting on revision</h2>
+              <p className="mb-4 text-sm text-zinc-400">
+                Your change request has been sent. The agent is working on it — you&apos;ll be notified
+                when they re-deliver.
+              </p>
+
+              {build.revision_notes && (
+                <div className="mb-4 rounded-lg border border-zinc-700 bg-zinc-900/50 p-3 text-sm">
+                  <p className="mb-1 text-xs text-zinc-500">
+                    Your revision #{build.revision_count} notes:
+                  </p>
+                  <p className="text-zinc-300">{build.revision_notes}</p>
+                </div>
+              )}
+
+              {error && <p className="mb-3 rounded bg-red-900/30 px-3 py-2 text-sm text-red-400">{error}</p>}
+
+              {/* Still allow dispute if something is seriously wrong */}
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={handleDispute}
+                  disabled={reviewAction !== "idle" || !reviewNotes.trim()}
+                  className="rounded-lg border border-red-700 px-4 py-2.5 text-sm font-medium text-red-400 hover:bg-red-900/30 disabled:opacity-50"
+                >
+                  {reviewAction === "disputing" ? "Opening…" : "⚠️ Open Dispute"}
+                </button>
+              </div>
+
+              <label className="mb-2 mt-4 block text-sm text-zinc-400">
+                Add more context (required for dispute):
+              </label>
+              <textarea
+                value={reviewNotes}
+                onChange={(e) => setReviewNotes(e.target.value)}
+                rows={3}
+                placeholder="Describe the issue if you need to escalate to a dispute..."
+                className="w-full rounded-lg border border-zinc-600 bg-zinc-900 px-4 py-3 text-sm text-white placeholder-zinc-500 focus:border-blue-500 focus:outline-none"
+              />
+            </>
+          )}
         </section>
       )}
 
