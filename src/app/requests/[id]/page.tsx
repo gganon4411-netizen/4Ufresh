@@ -3,17 +3,67 @@
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useWallet } from "@solana/wallet-adapter-react";
+import { useWalletModal } from "@solana/wallet-adapter-react-ui";
+import {
+  Connection,
+  PublicKey,
+  Transaction,
+} from "@solana/web3.js";
+import {
+  createTransferCheckedInstruction,
+  createAssociatedTokenAccountInstruction,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
 import { useAuth } from "@/contexts/AuthContext";
 import { useProfile } from "@/contexts/ProfileContext";
 import { supabase } from "@/lib/supabase";
 import type { RequestRow, Pitch } from "@/types";
 
+// ─── Solana constants ─────────────────────────────────────────────────────────
+const SOLANA_RPC =
+  process.env.NEXT_PUBLIC_SOLANA_RPC_URL ?? "https://api.devnet.solana.com";
+
+// Devnet USDC mint (Circle). For mainnet use EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+const USDC_MINT =
+  process.env.NEXT_PUBLIC_USDC_MINT ?? "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+
+// The platform custody wallet that holds escrow funds
+const ESCROW_WALLET =
+  process.env.NEXT_PUBLIC_ESCROW_WALLET ?? "2aMA6ePTAUDUym8tz6BHG8TsKaCgtS4Hzxfo2sLPFtJR";
+
+const USDC_DECIMALS = 6;
+
+/** Parse a human-readable price string like "$1,500" → 1500 */
+function parsePriceUSDC(raw: string | null): number | null {
+  if (!raw) return null;
+  const n = parseFloat(raw.replace(/[^0-9.]/g, ""));
+  return isNaN(n) || n <= 0 ? null : n;
+}
+
+// ─── Hiring status ────────────────────────────────────────────────────────────
+type HireStep = "idle" | "building_tx" | "awaiting_approval" | "confirming" | "creating_job";
+
+function hireStepLabel(step: HireStep): string {
+  switch (step) {
+    case "building_tx":     return "Preparing…";
+    case "awaiting_approval": return "Approve in wallet…";
+    case "confirming":      return "Confirming on-chain…";
+    case "creating_job":    return "Creating job…";
+    default:                return "Hire This Agent";
+  }
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 export default function RequestDetailPage() {
   const params = useParams();
   const router = useRouter();
   const id = params.id as string;
   const { user, session } = useAuth();
   const { profile } = useProfile();
+  const { publicKey, sendTransaction, connected } = useWallet();
+  const { setVisible: openWalletModal } = useWalletModal();
+
   const [request, setRequest] = useState<RequestRow | null>(null);
   const [pitches, setPitches] = useState<Pitch[]>([]);
   const [myAgents, setMyAgents] = useState<{ id: number; name: string }[]>([]);
@@ -24,8 +74,10 @@ export default function RequestDetailPage() {
   const [estimatedDelivery, setEstimatedDelivery] = useState("");
   const [priceQuote, setPriceQuote] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [hiring, setHiring] = useState(false);
+  const [hireStep, setHireStep] = useState<HireStep>("idle");
   const [error, setError] = useState<string | null>(null);
+
+  const hiring = hireStep !== "idle";
 
   useEffect(() => {
     if (!id) return;
@@ -56,8 +108,9 @@ export default function RequestDetailPage() {
 
   const isOwner = user && request && request.user_id === user.id;
   const isAgent = profile?.role === "agent_owner";
-  const pitchStatus = (p: Pitch) => (p as Pitch & { status?: string }).status ?? "pending";
+  const pitchStatus = (p: Pitch) => p.status ?? "pending";
 
+  // ─── Submit pitch ──────────────────────────────────────────────────────────
   const handleSubmitPitch = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!pitchMessage.trim()) return;
@@ -97,11 +150,87 @@ export default function RequestDetailPage() {
     }
   };
 
-  const handleHireAgent = async (pitchId: number, requestId: string) => {
+  // ─── Hire agent (USDC escrow flow) ────────────────────────────────────────
+  const handleHireAgent = async (pitchId: number, requestId: string, rawPriceQuote: string | null) => {
     if (!session) return;
-    setHiring(true);
     setError(null);
+
+    // Step 0 — wallet must be connected
+    if (!connected || !publicKey) {
+      openWalletModal(true);
+      return;
+    }
+
+    // Step 0b — must have a valid price to escrow
+    const usdcAmount = parsePriceUSDC(rawPriceQuote);
+    if (!usdcAmount) {
+      setError(
+        rawPriceQuote
+          ? `Could not parse price "${rawPriceQuote}" as a USDC amount.`
+          : "This pitch has no price quote. Ask the agent to add one before hiring."
+      );
+      return;
+    }
+
+    setHireStep("building_tx");
+
     try {
+      const connection = new Connection(SOLANA_RPC, "confirmed");
+      const usdcMint = new PublicKey(USDC_MINT);
+      const escrowPubkey = new PublicKey(ESCROW_WALLET);
+
+      // Derive ATAs
+      const buyerAta = getAssociatedTokenAddressSync(usdcMint, publicKey);
+      const escrowAta = getAssociatedTokenAddressSync(usdcMint, escrowPubkey);
+
+      const instructions = [];
+
+      // Create escrow ATA if it doesn't exist yet
+      const escrowAtaInfo = await connection.getAccountInfo(escrowAta);
+      if (!escrowAtaInfo) {
+        instructions.push(
+          createAssociatedTokenAccountInstruction(
+            publicKey,    // payer
+            escrowAta,    // ata address to create
+            escrowPubkey, // owner of the new ATA
+            usdcMint
+          )
+        );
+      }
+
+      // USDC transfer: buyer → escrow (6 decimals)
+      const atomicAmount = BigInt(Math.round(usdcAmount * 10 ** USDC_DECIMALS));
+      instructions.push(
+        createTransferCheckedInstruction(
+          buyerAta,      // source
+          usdcMint,      // mint
+          escrowAta,     // destination
+          publicKey,     // authority (buyer)
+          atomicAmount,  // amount
+          USDC_DECIMALS
+        )
+      );
+
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+      const tx = new Transaction({
+        recentBlockhash: blockhash,
+        feePayer: publicKey,
+      });
+      tx.add(...instructions);
+
+      // Step 1 — send to wallet for signing
+      setHireStep("awaiting_approval");
+      const txSignature = await sendTransaction(tx, connection);
+
+      // Step 2 — wait for on-chain confirmation
+      setHireStep("confirming");
+      await connection.confirmTransaction(
+        { signature: txSignature, blockhash, lastValidBlockHeight },
+        "confirmed"
+      );
+
+      // Step 3 — tell the backend to lock escrow & create the build
+      setHireStep("creating_job");
       const res = await fetch("/api/jobs/create", {
         method: "POST",
         headers: {
@@ -111,19 +240,31 @@ export default function RequestDetailPage() {
         body: JSON.stringify({
           pitch_id: pitchId,
           request_id: requestId,
+          tx_signature: txSignature,
         }),
       });
+
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error ?? "Failed to hire");
+        setError(data.error ?? "Backend rejected the hire request.");
         return;
       }
+
       router.refresh();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      // User rejected the wallet prompt — don't show a scary error
+      if (msg.toLowerCase().includes("user rejected") || msg.toLowerCase().includes("cancelled")) {
+        setError("Transaction cancelled.");
+      } else {
+        setError(msg);
+      }
     } finally {
-      setHiring(false);
+      setHireStep("idle");
     }
   };
 
+  // ─── Status change ─────────────────────────────────────────────────────────
   const handleStatusChange = async (newStatus: RequestRow["status"]) => {
     if (!request || request.user_id !== user?.id) return;
     try {
@@ -135,6 +276,7 @@ export default function RequestDetailPage() {
     }
   };
 
+  // ─── Loading / not found ───────────────────────────────────────────────────
   if (loading || !request) {
     return (
       <main className="flex min-h-screen items-center justify-center">
@@ -143,6 +285,7 @@ export default function RequestDetailPage() {
     );
   }
 
+  // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <main className="mx-auto max-w-3xl px-4 py-8">
       <header className="mb-6 flex items-center gap-4">
@@ -174,6 +317,8 @@ export default function RequestDetailPage() {
           <ul className="space-y-4">
             {pitches.map((p) => {
               const status = pitchStatus(p);
+              const usdcAmount = parsePriceUSDC(p.price_quote);
+
               return (
                 <li key={p.id} className="rounded-lg border border-zinc-700 bg-zinc-900/50 p-4">
                   <div className="flex items-start justify-between gap-4">
@@ -191,15 +336,26 @@ export default function RequestDetailPage() {
                         </div>
                       )}
                     </div>
+
                     {isOwner && request.status === "open" && status === "pending" && (
-                      <button
-                        type="button"
-                        onClick={() => handleHireAgent(p.id, request.id_uuid)}
-                        disabled={hiring}
-                        className="shrink-0 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-                      >
-                        {hiring ? "Hiring…" : "Hire This Agent"}
-                      </button>
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleHireAgent(p.id, request.id_uuid, p.price_quote)}
+                          disabled={hiring}
+                          className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                        >
+                          {hiring ? hireStepLabel(hireStep) : "Hire This Agent"}
+                        </button>
+                        {usdcAmount && !hiring && (
+                          <span className="text-xs text-zinc-500">
+                            {!connected ? "Connect wallet to pay" : `Pay ${usdcAmount} USDC`}
+                          </span>
+                        )}
+                        {!p.price_quote && !hiring && (
+                          <span className="text-xs text-amber-500">No price — ask agent to quote</span>
+                        )}
+                      </div>
                     )}
                   </div>
                 </li>
@@ -208,6 +364,12 @@ export default function RequestDetailPage() {
           </ul>
         )}
       </section>
+
+      {error && (
+        <p className="mb-4 rounded-lg border border-red-800 bg-red-900/30 px-4 py-2 text-sm text-red-400">
+          {error}
+        </p>
+      )}
 
       {isOwner && request.status !== "open" && (
         <div className="mb-6 flex flex-wrap gap-2">
