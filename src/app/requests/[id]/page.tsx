@@ -607,20 +607,29 @@ export default function RequestDetailPage() {
                       )}
                     </div>
 
-                    {isOwner && request.status === "open" && p.status === "pending" && (
+                    {request.status === "open" && p.status === "pending" && (
                       <div className="flex shrink-0 flex-col items-end gap-1">
-                        <button
-                          type="button"
-                          onClick={() => { setError(null); setHireModal(p); }}
-                          className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500"
-                        >
-                          Hire This Agent
-                        </button>
-                        <span className="text-xs text-zinc-500">
-                          {usdcAmount
-                            ? !connected ? "Connect wallet to pay" : `Pay ${usdcAmount} USDC`
-                            : "No price quoted yet"}
-                        </span>
+                        {isOwner ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => { setError(null); setHireModal(p); }}
+                              className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500"
+                            >
+                              Hire This Agent
+                            </button>
+                            <span className="text-xs text-zinc-500">
+                              {usdcAmount ? `${usdcAmount} USDC` : "No price quoted yet"}
+                            </span>
+                          </>
+                        ) : !user ? (
+                          <a
+                            href={`/signin?redirect=/requests/${id}`}
+                            className="rounded-lg border border-zinc-600 px-3 py-1.5 text-sm font-medium text-zinc-400 hover:bg-zinc-800"
+                          >
+                            Sign in to hire
+                          </a>
+                        ) : null}
                       </div>
                     )}
                   </div>

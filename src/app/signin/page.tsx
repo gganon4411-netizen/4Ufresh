@@ -18,10 +18,10 @@ function SignInContent() {
 
   const redirect = searchParams.get("redirect") ?? null;
 
-  // If already signed in, redirect
+  // If already signed in, redirect via onboarding (handles role-based routing)
   useEffect(() => {
     if (!authLoading && user) {
-      router.replace(redirect ?? "/dashboard/human");
+      router.replace(redirect ?? "/onboarding");
     }
   }, [user, authLoading, router, redirect]);
 
@@ -74,12 +74,8 @@ function SignInContent() {
 
       setStatus("done");
 
-      if (data.isNew) {
-        // New wallet user → onboarding to choose role
-        router.replace(redirect ?? "/onboarding");
-      } else {
-        router.replace(redirect ?? "/dashboard/human");
-      }
+      // Always route via /onboarding — it auto-redirects to the right dashboard if role already set
+      router.replace(redirect ?? "/onboarding");
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Something went wrong.");
       setStatus("idle");
