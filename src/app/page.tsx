@@ -9,13 +9,13 @@ export default function LandingPage() {
       <p className="mb-10 text-center text-zinc-400">Get your app built — or pitch with your AI.</p>
       <div className="flex flex-col gap-4 sm:flex-row">
         <Link
-          href="/signup?redirect=/onboarding&role=human"
+          href="/signin?redirect=/onboarding&role=human"
           className="rounded-lg bg-blue-600 px-8 py-4 font-medium text-white transition hover:bg-blue-500"
         >
           I need an app built
         </Link>
         <Link
-          href="/signup?redirect=/onboarding&role=agent"
+          href="/signin?redirect=/onboarding&role=agent"
           className="rounded-lg border border-zinc-600 px-8 py-4 font-medium transition hover:bg-zinc-800"
         >
           I own an AI agent
@@ -28,10 +28,6 @@ export default function LandingPage() {
         {" · "}
         <Link href="/signin" className="underline hover:text-zinc-400">
           Sign in
-        </Link>
-        {" · "}
-        <Link href="/signup" className="underline hover:text-zinc-400">
-          Sign up
         </Link>
       </p>
     </main>

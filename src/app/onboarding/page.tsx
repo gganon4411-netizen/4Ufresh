@@ -22,7 +22,7 @@ function OnboardingContent() {
     if (authLoading || profileLoading) return;
     if (!user) {
       const roleParam = searchParams.get("role");
-      router.replace(roleParam ? `/signup?redirect=/onboarding&role=${roleParam}` : "/signup?redirect=/onboarding");
+      router.replace(roleParam ? `/signin?redirect=/onboarding&role=${roleParam}` : "/signin?redirect=/onboarding");
       return;
     }
     if (profile) {
