@@ -4,13 +4,6 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { useWalletModal } from "@solana/wallet-adapter-react-ui";
-import { Connection, PublicKey, Transaction } from "@solana/web3.js";
-import {
-  createTransferCheckedInstruction,
-  createAssociatedTokenAccountInstruction,
-  getAssociatedTokenAddressSync,
-} from "@solana/spl-token";
 import { useAuth } from "@/contexts/AuthContext";
 import { useProfile } from "@/contexts/ProfileContext";
 import { supabase } from "@/lib/supabase";
@@ -46,14 +39,7 @@ interface Build {
 }
 
 // ─── Hire step ────────────────────────────────────────────────────────────────
-type HireStep = "idle" | "building_tx" | "awaiting_approval" | "confirming" | "creating_job";
-function hireStepLabel(s: HireStep) {
-  if (s === "building_tx") return "Preparing…";
-  if (s === "awaiting_approval") return "Approve in wallet…";
-  if (s === "confirming") return "Confirming on-chain…";
-  if (s === "creating_job") return "Creating job…";
-  return "Confirm & Pay";
-}
+type HireStep = "idle" | "creating_job";
 
 // ─── Build status label ───────────────────────────────────────────────────────
 function buildStatusLabel(status: string) {
@@ -77,8 +63,7 @@ export default function RequestDetailPage() {
   const id = params.id as string;
   const { user, session } = useAuth();
   const { profile } = useProfile();
-  const { publicKey, sendTransaction, connected } = useWallet();
-  const { setVisible: openWalletModal } = useWalletModal();
+  const { connected } = useWallet();
 
   const [request, setRequest] = useState<RequestRow | null>(null);
   const [pitches, setPitches] = useState<Pitch[]>([]);
@@ -97,6 +82,9 @@ export default function RequestDetailPage() {
   // Hire modal
   const [hireModal, setHireModal] = useState<Pitch | null>(null);
   const [hireStep, setHireStep] = useState<HireStep>("idle");
+  const [hireFlowStep, setHireFlowStep] = useState<"send" | "submit">("send");
+  const [txHashInput, setTxHashInput] = useState("");
+  const [copied, setCopied] = useState(false);
 
   // Review tab
   const [reviewNotes, setReviewNotes] = useState("");
@@ -175,61 +163,37 @@ export default function RequestDetailPage() {
     }
   };
 
-  // ─── Send USDC + create job ───────────────────────────────────────────────
-  const executeHire = async (pitch: Pitch) => {
+  // ─── Submit tx hash + create job ─────────────────────────────────────────
+  const executeHire = async (pitch: Pitch, txSignature: string) => {
     if (!session) return;
     setError(null);
+    const trimmedSig = txSignature.trim();
+    if (!trimmedSig) { setError("Please paste your transaction signature."); return; }
 
-    if (!connected || !publicKey) { openWalletModal(true); return; }
-
-    const usdcAmount = parsePriceUSDC(pitch.price_quote);
-    if (!usdcAmount) {
-      setError("This pitch has no valid price quote.");
-      return;
-    }
-
-    setHireStep("building_tx");
+    setHireStep("creating_job");
     try {
-      const connection = new Connection(SOLANA_RPC, "confirmed");
-      const usdcMint = new PublicKey(USDC_MINT);
-      const escrowPubkey = new PublicKey(ESCROW_WALLET);
-      const buyerAta = getAssociatedTokenAddressSync(usdcMint, publicKey);
-      const escrowAta = getAssociatedTokenAddressSync(usdcMint, escrowPubkey);
-
-      const instructions = [];
-      const escrowAtaInfo = await connection.getAccountInfo(escrowAta);
-      if (!escrowAtaInfo) {
-        instructions.push(createAssociatedTokenAccountInstruction(publicKey, escrowAta, escrowPubkey, usdcMint));
-      }
-      const atomicAmount = BigInt(Math.round(usdcAmount * 10 ** USDC_DECIMALS));
-      instructions.push(createTransferCheckedInstruction(buyerAta, usdcMint, escrowAta, publicKey, atomicAmount, USDC_DECIMALS));
-
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-      const tx = new Transaction({ recentBlockhash: blockhash, feePayer: publicKey });
-      tx.add(...instructions);
-
-      setHireStep("awaiting_approval");
-      const txSignature = await sendTransaction(tx, connection);
-
-      setHireStep("confirming");
-      await connection.confirmTransaction({ signature: txSignature, blockhash, lastValidBlockHeight }, "confirmed");
-
-      setHireStep("creating_job");
       const res = await fetch("/api/jobs/create", {
         method: "POST",
         headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ pitch_id: pitch.id, request_id: request!.id_uuid, tx_signature: txSignature }),
+        body: JSON.stringify({ pitch_id: pitch.id, request_id: request!.id_uuid, tx_signature: trimmedSig }),
       });
       const data = await res.json();
-      if (!res.ok) { setError(data.error ?? "Failed to create job"); return; }
+      if (!res.ok) { setError(data.error ?? "Failed to verify transaction. Check your signature and try again."); return; }
       setHireModal(null);
+      setTxHashInput("");
+      setHireFlowStep("send");
       router.refresh();
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Unknown error";
-      setError(msg.toLowerCase().includes("user rejected") ? "Transaction cancelled." : msg);
+      setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setHireStep("idle");
     }
+  };
+
+  const handleCopyEscrow = () => {
+    navigator.clipboard.writeText(ESCROW_WALLET);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   // ─── Review actions ───────────────────────────────────────────────────────
@@ -289,15 +253,29 @@ export default function RequestDetailPage() {
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-8">
-      {/* ── Hire confirmation modal ─────────────────────────────────────── */}
+      {/* ── Hire modal — 2-step escrow flow ────────────────────────────── */}
       {hireModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
           <div className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl">
+
+            {/* Step indicator */}
+            <div className="mb-5 flex items-center gap-2 text-xs font-medium">
+              <span className={`rounded-full px-2.5 py-0.5 ${hireFlowStep === "send" ? "bg-purple-600 text-white" : "bg-zinc-700 text-zinc-400"}`}>
+                1 Send USDC
+              </span>
+              <span className="text-zinc-600">→</span>
+              <span className={`rounded-full px-2.5 py-0.5 ${hireFlowStep === "submit" ? "bg-purple-600 text-white" : "bg-zinc-700 text-zinc-400"}`}>
+                2 Submit Proof
+              </span>
+            </div>
+
             <h2 className="mb-4 text-lg font-semibold">Hire {hireModal.agent_name ?? "Agent"}</h2>
+
+            {/* Summary row */}
             <div className="mb-4 space-y-2 rounded-lg bg-zinc-800 p-4 text-sm">
               <div className="flex justify-between">
-                <span className="text-zinc-400">Price</span>
-                <span className="font-medium text-green-400">
+                <span className="text-zinc-400">Amount to send</span>
+                <span className="font-bold text-green-400">
                   {usdcForModal ? `${usdcForModal} USDC` : hireModal.price_quote ?? "—"}
                 </span>
               </div>
@@ -309,33 +287,102 @@ export default function RequestDetailPage() {
               )}
               <div className="flex justify-between">
                 <span className="text-zinc-400">Platform fee</span>
-                <span className="text-zinc-500">{PLATFORM_FEE_PCT}% on release</span>
+                <span className="text-zinc-500">{PLATFORM_FEE_PCT}% deducted on release</span>
               </div>
             </div>
-            <p className="mb-5 text-sm text-zinc-400">
-              Your <span className="font-medium text-white">{usdcForModal} USDC</span> will be held
-              in escrow and only released to the agent once you accept their delivery. You can request
-              changes or open a dispute if needed.
-            </p>
-            {error && <p className="mb-3 text-sm text-red-400">{error}</p>}
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={() => { setHireModal(null); setError(null); }}
-                disabled={hiring}
-                className="flex-1 rounded-lg border border-zinc-600 px-4 py-2.5 text-sm font-medium hover:bg-zinc-800 disabled:opacity-50"
-              >
-                Back
-              </button>
-              <button
-                type="button"
-                onClick={() => executeHire(hireModal)}
-                disabled={hiring}
-                className="flex-1 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-              >
-                {hiring ? hireStepLabel(hireStep) : !connected ? "Connect Wallet" : "Confirm & Pay"}
-              </button>
-            </div>
+
+            {/* ── Step 1: Send USDC ── */}
+            {hireFlowStep === "send" && (
+              <div className="space-y-4">
+                <p className="text-sm text-zinc-400">
+                  Send exactly <span className="font-semibold text-white">{usdcForModal} USDC</span> to the escrow wallet below on <span className="text-purple-400 font-medium">Solana Devnet</span>. Funds are locked until you accept delivery.
+                </p>
+
+                {/* Escrow address box */}
+                <div>
+                  <p className="mb-1 text-xs font-medium text-zinc-500 uppercase tracking-wide">Escrow Wallet Address</p>
+                  <div className="flex items-center gap-2 rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-2">
+                    <span className="flex-1 break-all font-mono text-xs text-zinc-200">{ESCROW_WALLET}</span>
+                    <button
+                      type="button"
+                      onClick={handleCopyEscrow}
+                      className="shrink-0 rounded px-2 py-1 text-xs font-medium text-purple-400 hover:bg-zinc-700"
+                    >
+                      {copied ? "Copied!" : "Copy"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* USDC mint helper */}
+                <div>
+                  <p className="mb-1 text-xs font-medium text-zinc-500 uppercase tracking-wide">USDC Mint (Devnet)</p>
+                  <p className="break-all font-mono text-xs text-zinc-500">{USDC_MINT}</p>
+                </div>
+
+                <p className="text-xs text-zinc-500">
+                  Need devnet USDC? Get devnet SOL at <a href="https://solfaucet.com" target="_blank" rel="noopener noreferrer" className="text-purple-400 underline">solfaucet.com</a>, then swap at the devnet USDC faucet.
+                </p>
+
+                <div className="flex gap-3 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => { setHireModal(null); setHireFlowStep("send"); setError(null); setTxHashInput(""); }}
+                    className="flex-1 rounded-lg border border-zinc-600 px-4 py-2.5 text-sm font-medium hover:bg-zinc-800"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setError(null); setHireFlowStep("submit"); }}
+                    className="flex-1 rounded-lg bg-purple-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-purple-500"
+                  >
+                    I&apos;ve Sent the USDC →
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Step 2: Submit tx signature ── */}
+            {hireFlowStep === "submit" && (
+              <div className="space-y-4">
+                <p className="text-sm text-zinc-400">
+                  Paste the transaction signature from your wallet. The backend will verify the payment on-chain before the agent begins work.
+                </p>
+
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-zinc-400">Transaction Signature</label>
+                  <textarea
+                    value={txHashInput}
+                    onChange={(e) => setTxHashInput(e.target.value)}
+                    placeholder="e.g. 5Kz3…xR9t"
+                    rows={3}
+                    className="w-full rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-2 font-mono text-xs text-zinc-200 placeholder-zinc-600 focus:border-purple-500 focus:outline-none"
+                  />
+                </div>
+
+                {error && <p className="text-sm text-red-400">{error}</p>}
+
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => { setHireFlowStep("send"); setError(null); }}
+                    disabled={hiring}
+                    className="flex-1 rounded-lg border border-zinc-600 px-4 py-2.5 text-sm font-medium hover:bg-zinc-800 disabled:opacity-50"
+                  >
+                    ← Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => executeHire(hireModal, txHashInput)}
+                    disabled={hiring || !txHashInput.trim()}
+                    className="flex-1 rounded-lg bg-purple-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-purple-500 disabled:opacity-50"
+                  >
+                    {hiring ? "Verifying…" : "Verify & Hire Agent"}
+                  </button>
+                </div>
+              </div>
+            )}
+
           </div>
         </div>
       )}
